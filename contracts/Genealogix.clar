@@ -5,6 +5,11 @@
 (define-constant ERR-INVALID-RELATIONSHIP (err u406))
 (define-constant ERR-SELF-RELATIONSHIP (err u407))
 (define-constant ERR-INVALID-ORACLE (err u408))
+(define-constant ERR-WILL-EXISTS (err u409))
+(define-constant ERR-INVALID-BENEFICIARY (err u410))
+(define-constant ERR-INSUFFICIENT-ASSETS (err u411))
+(define-constant ERR-INHERITANCE-LOCKED (err u412))
+(define-constant ERR-NOT-ELIGIBLE (err u413))
 
 (define-data-var oracle-address principal 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)
 (define-data-var contract-owner principal tx-sender)
@@ -38,6 +43,39 @@
     subject: principal,
     confidence: uint,
     processed: bool
+})
+
+(define-map inheritance-wills principal {
+    total-assets: uint,
+    asset-description: (string-ascii 200),
+    created-at: uint,
+    last-updated: uint,
+    is-active: bool,
+    executor: (optional principal),
+    lock-period: uint
+})
+
+(define-map inheritance-beneficiaries {testator: principal, beneficiary: principal} {
+    asset-percentage: uint,
+    asset-amount: uint,
+    relationship-verified: bool,
+    claimed: bool,
+    claim-date: (optional uint)
+})
+
+(define-map inheritance-claims principal {
+    total-claimed: uint,
+    pending-claims: (list 20 principal),
+    processed-claims: (list 50 principal),
+    last-claim-date: uint
+})
+
+(define-map asset-transfers {from: principal, to: principal, transfer-id: uint} {
+    asset-value: uint,
+    transfer-date: uint,
+    transfer-type: (string-ascii 30),
+    approved-by: (optional principal),
+    completed: bool
 })
 
 (define-public (register-user (name (string-ascii 50)) (birth-year uint) (gender (string-ascii 10)) (dna-hash (buff 32)))
@@ -248,6 +286,217 @@
             (match relationship-1 rel1 (get verified rel1) false)
             (match relationship-2 rel2 (get verified rel2) false)
         )
+    )
+)
+
+(define-public (create-inheritance-will (total-assets uint) (asset-description (string-ascii 200)) (executor (optional principal)) (lock-period uint))
+    (let ((creator tx-sender))
+        (asserts! (is-some (map-get? users creator)) ERR-NOT-FOUND)
+        (asserts! (is-none (map-get? inheritance-wills creator)) ERR-WILL-EXISTS)
+        (asserts! (> total-assets u0) ERR-INSUFFICIENT-ASSETS)
+        (asserts! (> (len asset-description) u0) ERR-INVALID-DNA)
+        (map-set inheritance-wills creator {
+            total-assets: total-assets,
+            asset-description: asset-description,
+            created-at: stacks-block-height,
+            last-updated: stacks-block-height,
+            is-active: true,
+            executor: executor,
+            lock-period: lock-period
+        })
+        (map-set inheritance-claims creator {
+            total-claimed: u0,
+            pending-claims: (list),
+            processed-claims: (list),
+            last-claim-date: u0
+        })
+        (ok true)
+    )
+)
+
+(define-public (add-beneficiary (beneficiary principal) (asset-percentage uint) (asset-amount uint))
+    (let ((testator tx-sender)
+          (will-data (unwrap! (map-get? inheritance-wills testator) ERR-NOT-FOUND)))
+        (asserts! (is-some (map-get? users beneficiary)) ERR-INVALID-BENEFICIARY)
+        (asserts! (get is-active will-data) ERR-INHERITANCE-LOCKED)
+        (asserts! (<= asset-percentage u100) ERR-INVALID-BENEFICIARY)
+        (asserts! (> asset-amount u0) ERR-INSUFFICIENT-ASSETS)
+        (asserts! (is-none (map-get? inheritance-beneficiaries {testator: testator, beneficiary: beneficiary})) ERR-ALREADY-EXISTS)
+        (let ((is-family-verified (is-verified-lineage testator beneficiary)))
+            (map-set inheritance-beneficiaries {testator: testator, beneficiary: beneficiary} {
+                asset-percentage: asset-percentage,
+                asset-amount: asset-amount,
+                relationship-verified: is-family-verified,
+                claimed: false,
+                claim-date: none
+            })
+            (map-set inheritance-wills testator (merge will-data {last-updated: stacks-block-height}))
+            (ok true)
+        )
+    )
+)
+
+(define-public (update-beneficiary-allocation (beneficiary principal) (new-asset-percentage uint) (new-asset-amount uint))
+    (let ((testator tx-sender)
+          (will-data (unwrap! (map-get? inheritance-wills testator) ERR-NOT-FOUND))
+          (beneficiary-key {testator: testator, beneficiary: beneficiary})
+          (beneficiary-data (unwrap! (map-get? inheritance-beneficiaries beneficiary-key) ERR-INVALID-BENEFICIARY)))
+        (asserts! (get is-active will-data) ERR-INHERITANCE-LOCKED)
+        (asserts! (<= new-asset-percentage u100) ERR-INVALID-BENEFICIARY)
+        (asserts! (> new-asset-amount u0) ERR-INSUFFICIENT-ASSETS)
+        (asserts! (not (get claimed beneficiary-data)) ERR-INHERITANCE-LOCKED)
+        (map-set inheritance-beneficiaries beneficiary-key (merge beneficiary-data {
+            asset-percentage: new-asset-percentage,
+            asset-amount: new-asset-amount
+        }))
+        (map-set inheritance-wills testator (merge will-data {last-updated: stacks-block-height}))
+        (ok true)
+    )
+)
+
+(define-public (claim-inheritance (testator principal))
+    (let ((claimer tx-sender)
+          (beneficiary-key {testator: testator, beneficiary: claimer})
+          (beneficiary-data (unwrap! (map-get? inheritance-beneficiaries beneficiary-key) ERR-NOT-ELIGIBLE))
+          (will-data (unwrap! (map-get? inheritance-wills testator) ERR-NOT-FOUND))
+          (claims-data (default-to {total-claimed: u0, pending-claims: (list), processed-claims: (list), last-claim-date: u0} (map-get? inheritance-claims testator))))
+        (asserts! (get is-active will-data) ERR-INHERITANCE-LOCKED)
+        (asserts! (not (get claimed beneficiary-data)) ERR-ALREADY-EXISTS)
+        (asserts! (get relationship-verified beneficiary-data) ERR-NOT-ELIGIBLE)
+        (asserts! (> (+ stacks-block-height (get lock-period will-data)) (get created-at will-data)) ERR-INHERITANCE-LOCKED)
+        (map-set inheritance-beneficiaries beneficiary-key (merge beneficiary-data {
+            claimed: true,
+            claim-date: (some stacks-block-height)
+        }))
+        (map-set inheritance-claims testator (merge claims-data {
+            total-claimed: (+ (get total-claimed claims-data) (get asset-amount beneficiary-data)),
+            processed-claims: (unwrap-panic (as-max-len? (append (get processed-claims claims-data) claimer) u50)),
+            last-claim-date: stacks-block-height
+        }))
+        (ok (get asset-amount beneficiary-data))
+    )
+)
+
+(define-public (transfer-asset (recipient principal) (asset-value uint) (transfer-type (string-ascii 30)) (transfer-id uint))
+    (let ((sender tx-sender)
+          (transfer-key {from: sender, to: recipient, transfer-id: transfer-id}))
+        (asserts! (is-some (map-get? users sender)) ERR-NOT-FOUND)
+        (asserts! (is-some (map-get? users recipient)) ERR-NOT-FOUND)
+        (asserts! (> asset-value u0) ERR-INSUFFICIENT-ASSETS)
+        (asserts! (is-none (map-get? asset-transfers transfer-key)) ERR-ALREADY-EXISTS)
+        (map-set asset-transfers transfer-key {
+            asset-value: asset-value,
+            transfer-date: stacks-block-height,
+            transfer-type: transfer-type,
+            approved-by: none,
+            completed: false
+        })
+        (ok transfer-id)
+    )
+)
+
+(define-public (approve-asset-transfer (from principal) (to principal) (transfer-id uint))
+    (let ((approver tx-sender)
+          (transfer-key {from: from, to: to, transfer-id: transfer-id})
+          (transfer-data (unwrap! (map-get? asset-transfers transfer-key) ERR-NOT-FOUND)))
+        (asserts! (or (is-eq approver from) (is-eq approver (var-get contract-owner))) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get completed transfer-data)) ERR-ALREADY-EXISTS)
+        (map-set asset-transfers transfer-key (merge transfer-data {
+            approved-by: (some approver),
+            completed: true
+        }))
+        (ok true)
+    )
+)
+
+(define-public (revoke-inheritance-will)
+    (let ((testator tx-sender)
+          (will-data (unwrap! (map-get? inheritance-wills testator) ERR-NOT-FOUND)))
+        (asserts! (get is-active will-data) ERR-INHERITANCE-LOCKED)
+        (map-set inheritance-wills testator (merge will-data {
+            is-active: false,
+            last-updated: stacks-block-height
+        }))
+        (ok true)
+    )
+)
+
+(define-public (activate-inheritance-will)
+    (let ((testator tx-sender)
+          (will-data (unwrap! (map-get? inheritance-wills testator) ERR-NOT-FOUND)))
+        (asserts! (not (get is-active will-data)) ERR-WILL-EXISTS)
+        (map-set inheritance-wills testator (merge will-data {
+            is-active: true,
+            last-updated: stacks-block-height
+        }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-inheritance-will (testator principal))
+    (map-get? inheritance-wills testator)
+)
+
+(define-read-only (get-beneficiary-info (testator principal) (beneficiary principal))
+    (map-get? inheritance-beneficiaries {testator: testator, beneficiary: beneficiary})
+)
+
+(define-read-only (get-inheritance-claims (testator principal))
+    (map-get? inheritance-claims testator)
+)
+
+(define-read-only (get-asset-transfer (from principal) (to principal) (transfer-id uint))
+    (map-get? asset-transfers {from: from, to: to, transfer-id: transfer-id})
+)
+
+(define-read-only (calculate-inheritance-value (testator principal) (beneficiary principal))
+    (let ((will-data (unwrap! (map-get? inheritance-wills testator) u0))
+          (beneficiary-data (unwrap! (map-get? inheritance-beneficiaries {testator: testator, beneficiary: beneficiary}) u0)))
+        (/ (* (get total-assets will-data) (get asset-percentage beneficiary-data)) u100)
+    )
+)
+
+(define-read-only (get-total-beneficiaries (testator principal))
+    (let ((will-data (unwrap! (map-get? inheritance-wills testator) u0)))
+        u0
+    )
+)
+
+(define-read-only (is-inheritance-claimable (testator principal) (beneficiary principal))
+    (let ((will-data (unwrap! (map-get? inheritance-wills testator) false))
+          (beneficiary-data (unwrap! (map-get? inheritance-beneficiaries {testator: testator, beneficiary: beneficiary}) false)))
+        (and 
+            (get is-active will-data)
+            (not (get claimed beneficiary-data))
+            (get relationship-verified beneficiary-data)
+            (> (+ stacks-block-height (get lock-period will-data)) (get created-at will-data))
+        )
+    )
+)
+
+(define-read-only (get-inheritance-statistics (testator principal))
+    (let ((will-data (map-get? inheritance-wills testator))
+          (claims-data (map-get? inheritance-claims testator)))
+        (match will-data
+            some-will (match claims-data
+                some-claims {
+                    total-assets: (get total-assets some-will),
+                    claimed-amount: (get total-claimed some-claims),
+                    remaining-assets: (- (get total-assets some-will) (get total-claimed some-claims)),
+                    processed-claims-count: (len (get processed-claims some-claims))
+                }
+                {
+                    total-assets: (get total-assets some-will),
+                    claimed-amount: u0,
+                    remaining-assets: (get total-assets some-will),
+                    processed-claims-count: u0
+                })
+            {
+                total-assets: u0,
+                claimed-amount: u0,
+                remaining-assets: u0,
+                processed-claims-count: u0
+            })
     )
 )
 
