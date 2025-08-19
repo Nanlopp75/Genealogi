@@ -10,6 +10,11 @@
 (define-constant ERR-INSUFFICIENT-ASSETS (err u411))
 (define-constant ERR-INHERITANCE-LOCKED (err u412))
 (define-constant ERR-NOT-ELIGIBLE (err u413))
+(define-constant ERR-MEDICAL-RECORD-EXISTS (err u414))
+(define-constant ERR-INVALID-MEDICAL-DATA (err u415))
+(define-constant ERR-MEDICAL-ACCESS-DENIED (err u416))
+(define-constant ERR-INVALID-HEALTH-SCORE (err u417))
+(define-constant ERR-CONDITION-NOT-FOUND (err u418))
 
 (define-data-var oracle-address principal 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)
 (define-data-var contract-owner principal tx-sender)
@@ -76,6 +81,70 @@
     transfer-type: (string-ascii 30),
     approved-by: (optional principal),
     completed: bool
+})
+
+(define-map medical-records principal {
+    blood-type: (string-ascii 5),
+    allergies: (list 10 (string-ascii 50)),
+    chronic-conditions: (list 15 (string-ascii 100)),
+    genetic-markers: (list 20 (buff 16)),
+    medical-history-hash: (buff 32),
+    last-updated: uint,
+    privacy-level: uint,
+    authorized-viewers: (list 10 principal),
+    record-version: uint
+})
+
+(define-map genetic-conditions principal {
+    condition-name: (string-ascii 100),
+    severity-score: uint,
+    age-of-onset: uint,
+    inheritance-pattern: (string-ascii 30),
+    affected-relatives: (list 20 principal),
+    confirmation-status: (string-ascii 20),
+    medical-notes: (string-ascii 500),
+    recorded-by: principal,
+    recorded-date: uint
+})
+
+(define-map family-health-patterns {family-id: principal, condition: (string-ascii 100)} {
+    occurrence-count: uint,
+    affected-members: (list 30 principal),
+    risk-assessment: uint,
+    pattern-confidence: uint,
+    last-analysis: uint,
+    heredity-probability: uint
+})
+
+(define-map health-risk-assessments principal {
+    overall-risk-score: uint,
+    cardiovascular-risk: uint,
+    diabetes-risk: uint,
+    cancer-risk: uint,
+    neurological-risk: uint,
+    metabolic-risk: uint,
+    calculated-date: uint,
+    assessment-version: uint,
+    risk-factors: (list 15 (string-ascii 80))
+})
+
+(define-map medical-access-permissions {patient: principal, accessor: principal} {
+    access-level: uint,
+    granted-date: uint,
+    expiry-date: uint,
+    access-purpose: (string-ascii 100),
+    revoked: bool,
+    granted-by: principal
+})
+
+(define-map hereditary-trait-tracking {trait-name: (string-ascii 80), family-line: principal} {
+    trait-description: (string-ascii 200),
+    expression-frequency: uint,
+    carriers: (list 25 principal),
+    phenotype-data: (list 10 (string-ascii 100)),
+    genetic-basis: (string-ascii 150),
+    tracking-status: (string-ascii 20),
+    research-value: uint
 })
 
 (define-public (register-user (name (string-ascii 50)) (birth-year uint) (gender (string-ascii 10)) (dna-hash (buff 32)))
@@ -497,6 +566,274 @@
                 remaining-assets: u0,
                 processed-claims-count: u0
             })
+    )
+)
+
+(define-public (create-medical-record (blood-type (string-ascii 5)) (allergies (list 10 (string-ascii 50))) (chronic-conditions (list 15 (string-ascii 100))) (medical-history-hash (buff 32)) (privacy-level uint))
+    (let ((patient tx-sender))
+        (asserts! (is-some (map-get? users patient)) ERR-NOT-FOUND)
+        (asserts! (is-none (map-get? medical-records patient)) ERR-MEDICAL-RECORD-EXISTS)
+        (asserts! (<= privacy-level u3) ERR-INVALID-MEDICAL-DATA)
+        (asserts! (> (len blood-type) u0) ERR-INVALID-MEDICAL-DATA)
+        (map-set medical-records patient {
+            blood-type: blood-type,
+            allergies: allergies,
+            chronic-conditions: chronic-conditions,
+            genetic-markers: (list),
+            medical-history-hash: medical-history-hash,
+            last-updated: stacks-block-height,
+            privacy-level: privacy-level,
+            authorized-viewers: (list),
+            record-version: u1
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-medical-record (blood-type (string-ascii 5)) (allergies (list 10 (string-ascii 50))) (chronic-conditions (list 15 (string-ascii 100))) (medical-history-hash (buff 32)))
+    (let ((patient tx-sender)
+          (current-record (unwrap! (map-get? medical-records patient) ERR-NOT-FOUND)))
+        (asserts! (> (len blood-type) u0) ERR-INVALID-MEDICAL-DATA)
+        (map-set medical-records patient (merge current-record {
+            blood-type: blood-type,
+            allergies: allergies,
+            chronic-conditions: chronic-conditions,
+            medical-history-hash: medical-history-hash,
+            last-updated: stacks-block-height,
+            record-version: (+ (get record-version current-record) u1)
+        }))
+        (ok true)
+    )
+)
+
+(define-public (grant-medical-access (accessor principal) (access-level uint) (expiry-date uint) (access-purpose (string-ascii 100)))
+    (let ((patient tx-sender)
+          (access-key {patient: patient, accessor: accessor}))
+        (asserts! (is-some (map-get? users patient)) ERR-NOT-FOUND)
+        (asserts! (is-some (map-get? users accessor)) ERR-NOT-FOUND)
+        (asserts! (<= access-level u3) ERR-INVALID-MEDICAL-DATA)
+        (asserts! (> expiry-date stacks-block-height) ERR-INVALID-MEDICAL-DATA)
+        (asserts! (> (len access-purpose) u0) ERR-INVALID-MEDICAL-DATA)
+        (map-set medical-access-permissions access-key {
+            access-level: access-level,
+            granted-date: stacks-block-height,
+            expiry-date: expiry-date,
+            access-purpose: access-purpose,
+            revoked: false,
+            granted-by: patient
+        })
+        (ok true)
+    )
+)
+
+(define-public (revoke-medical-access (accessor principal))
+    (let ((patient tx-sender)
+          (access-key {patient: patient, accessor: accessor})
+          (permission-data (unwrap! (map-get? medical-access-permissions access-key) ERR-NOT-FOUND)))
+        (map-set medical-access-permissions access-key (merge permission-data {revoked: true}))
+        (ok true)
+    )
+)
+
+(define-public (record-genetic-condition (condition-name (string-ascii 100)) (severity-score uint) (age-of-onset uint) (inheritance-pattern (string-ascii 30)) (medical-notes (string-ascii 500)))
+    (let ((patient tx-sender))
+        (asserts! (is-some (map-get? users patient)) ERR-NOT-FOUND)
+        (asserts! (<= severity-score u10) ERR-INVALID-HEALTH-SCORE)
+        (asserts! (> (len condition-name) u0) ERR-INVALID-MEDICAL-DATA)
+        (asserts! (> (len inheritance-pattern) u0) ERR-INVALID-MEDICAL-DATA)
+        (map-set genetic-conditions patient {
+            condition-name: condition-name,
+            severity-score: severity-score,
+            age-of-onset: age-of-onset,
+            inheritance-pattern: inheritance-pattern,
+            affected-relatives: (list),
+            confirmation-status: "self-reported",
+            medical-notes: medical-notes,
+            recorded-by: patient,
+            recorded-date: stacks-block-height
+        })
+        (unwrap! (analyze-family-health-pattern patient condition-name) ERR-NOT-FOUND)
+        (ok true)
+    )
+)
+
+(define-public (confirm-genetic-condition (patient principal) (status (string-ascii 20)))
+    (let ((condition-data (unwrap! (map-get? genetic-conditions patient) ERR-CONDITION-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (var-get oracle-address)) ERR-NOT-AUTHORIZED)
+        (asserts! (or (is-eq status "confirmed") (is-eq status "unconfirmed") (is-eq status "pending")) ERR-INVALID-MEDICAL-DATA)
+        (map-set genetic-conditions patient (merge condition-data {confirmation-status: status}))
+        (ok true)
+    )
+)
+
+(define-public (calculate-health-risk-assessment (patient principal))
+    (let ((medical-record (unwrap! (map-get? medical-records patient) ERR-NOT-FOUND))
+          (genetic-condition (map-get? genetic-conditions patient))
+          (family-tree (unwrap! (map-get? family-trees patient) ERR-NOT-FOUND)))
+        (asserts! (has-medical-access tx-sender patient) ERR-MEDICAL-ACCESS-DENIED)
+        (let ((base-risk-score (calculate-base-risk-score medical-record))
+              (genetic-risk-modifier (calculate-genetic-risk-modifier genetic-condition))
+              (family-history-risk (calculate-family-history-risk patient)))
+            (let ((overall-risk (+ base-risk-score (+ genetic-risk-modifier family-history-risk))))
+                (map-set health-risk-assessments patient {
+                    overall-risk-score: overall-risk,
+                    cardiovascular-risk: (/ (* overall-risk u25) u100),
+                    diabetes-risk: (/ (* overall-risk u20) u100),
+                    cancer-risk: (/ (* overall-risk u30) u100),
+                    neurological-risk: (/ (* overall-risk u15) u100),
+                    metabolic-risk: (/ (* overall-risk u10) u100),
+                    calculated-date: stacks-block-height,
+                    assessment-version: u1,
+                    risk-factors: (list)
+                })
+                (ok overall-risk)
+            )
+        )
+    )
+)
+
+(define-public (track-hereditary-trait (trait-name (string-ascii 80)) (trait-description (string-ascii 200)) (genetic-basis (string-ascii 150)))
+    (let ((tracker tx-sender)
+          (trait-key {trait-name: trait-name, family-line: tracker}))
+        (asserts! (is-some (map-get? users tracker)) ERR-NOT-FOUND)
+        (asserts! (> (len trait-name) u0) ERR-INVALID-MEDICAL-DATA)
+        (asserts! (> (len trait-description) u0) ERR-INVALID-MEDICAL-DATA)
+        (asserts! (is-none (map-get? hereditary-trait-tracking trait-key)) ERR-ALREADY-EXISTS)
+        (map-set hereditary-trait-tracking trait-key {
+            trait-description: trait-description,
+            expression-frequency: u0,
+            carriers: (list),
+            phenotype-data: (list),
+            genetic-basis: genetic-basis,
+            tracking-status: "active",
+            research-value: u1
+        })
+        (ok true)
+    )
+)
+
+(define-public (add-trait-carrier (trait-name (string-ascii 80)) (family-line principal) (carrier principal))
+    (let ((trait-key {trait-name: trait-name, family-line: family-line})
+          (trait-data (unwrap! (map-get? hereditary-trait-tracking trait-key) ERR-NOT-FOUND)))
+        (asserts! (is-some (map-get? users carrier)) ERR-NOT-FOUND)
+        (asserts! (is-related family-line carrier) ERR-INVALID-RELATIONSHIP)
+        (asserts! (or (is-eq tx-sender family-line) (is-eq tx-sender carrier)) ERR-NOT-AUTHORIZED)
+        (map-set hereditary-trait-tracking trait-key (merge trait-data {
+            carriers: (unwrap-panic (as-max-len? (append (get carriers trait-data) carrier) u25)),
+            expression-frequency: (+ (get expression-frequency trait-data) u1)
+        }))
+        (ok true)
+    )
+)
+
+(define-private (analyze-family-health-pattern (patient principal) (condition-name (string-ascii 100)))
+    (let ((family-tree (unwrap! (map-get? family-trees patient) ERR-NOT-FOUND))
+          (pattern-key {family-id: patient, condition: condition-name})
+          (existing-pattern (map-get? family-health-patterns pattern-key)))
+        (match existing-pattern
+            some-pattern 
+                (map-set family-health-patterns pattern-key (merge some-pattern {
+                    occurrence-count: (+ (get occurrence-count some-pattern) u1),
+                    affected-members: (unwrap-panic (as-max-len? (append (get affected-members some-pattern) patient) u30)),
+                    last-analysis: stacks-block-height
+                }))
+            (map-set family-health-patterns pattern-key {
+                occurrence-count: u1,
+                affected-members: (list patient),
+                risk-assessment: u50,
+                pattern-confidence: u30,
+                last-analysis: stacks-block-height,
+                heredity-probability: u40
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-private (calculate-base-risk-score (medical-record {blood-type: (string-ascii 5), allergies: (list 10 (string-ascii 50)), chronic-conditions: (list 15 (string-ascii 100)), genetic-markers: (list 20 (buff 16)), medical-history-hash: (buff 32), last-updated: uint, privacy-level: uint, authorized-viewers: (list 10 principal), record-version: uint}))
+    (+ (len (get chronic-conditions medical-record)) (* (len (get allergies medical-record)) u2))
+)
+
+(define-private (calculate-genetic-risk-modifier (genetic-condition (optional {condition-name: (string-ascii 100), severity-score: uint, age-of-onset: uint, inheritance-pattern: (string-ascii 30), affected-relatives: (list 20 principal), confirmation-status: (string-ascii 20), medical-notes: (string-ascii 500), recorded-by: principal, recorded-date: uint})))
+    (match genetic-condition
+        some-condition (get severity-score some-condition)
+        u0
+    )
+)
+
+(define-private (calculate-family-history-risk (patient principal))
+    (let ((family-tree (unwrap! (map-get? family-trees patient) u0)))
+        (len (get ancestors family-tree))
+    )
+)
+
+(define-private (has-medical-access (accessor principal) (patient principal))
+    (let ((access-key {patient: patient, accessor: accessor})
+          (permission (map-get? medical-access-permissions access-key)))
+        (if (is-eq accessor patient)
+            true
+            (match permission
+                some-permission 
+                    (and 
+                        (not (get revoked some-permission))
+                        (< stacks-block-height (get expiry-date some-permission))
+                        (> (get access-level some-permission) u0)
+                    )
+                false
+            )
+        )
+    )
+)
+
+(define-read-only (get-medical-record (patient principal))
+    (if (has-medical-access tx-sender patient)
+        (map-get? medical-records patient)
+        none
+    )
+)
+
+(define-read-only (get-genetic-condition (patient principal))
+    (if (has-medical-access tx-sender patient)
+        (map-get? genetic-conditions patient)
+        none
+    )
+)
+
+(define-read-only (get-health-risk-assessment (patient principal))
+    (if (has-medical-access tx-sender patient)
+        (map-get? health-risk-assessments patient)
+        none
+    )
+)
+
+(define-read-only (get-family-health-pattern (family-id principal) (condition (string-ascii 100)))
+    (if (is-related tx-sender family-id)
+        (map-get? family-health-patterns {family-id: family-id, condition: condition})
+        none
+    )
+)
+
+(define-read-only (get-hereditary-trait (trait-name (string-ascii 80)) (family-line principal))
+    (if (is-related tx-sender family-line)
+        (map-get? hereditary-trait-tracking {trait-name: trait-name, family-line: family-line})
+        none
+    )
+)
+
+(define-read-only (get-medical-access-permission (patient principal) (accessor principal))
+    (if (or (is-eq tx-sender patient) (is-eq tx-sender accessor))
+        (map-get? medical-access-permissions {patient: patient, accessor: accessor})
+        none
+    )
+)
+
+(define-read-only (calculate-family-health-statistics (family-head principal))
+    (let ((family-tree (unwrap! (map-get? family-trees family-head) {total-conditions: u0, health-diversity: u0, risk-level: u0})))
+        {
+            total-conditions: u0,
+            health-diversity: (len (get descendants family-tree)),
+            risk-level: u50
+        }
     )
 )
 
